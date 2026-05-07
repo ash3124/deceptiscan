@@ -1,0 +1,7 @@
+venv/
+__pycache__/
+*.pyc
+.env
+.DS_Store
+Thumbs.db
+backend/models/all-MiniLM-L6-v2/

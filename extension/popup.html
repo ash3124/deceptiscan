@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<!--
+  popup.html - DeceptiScan Extension Popup
+  
+  Provides a manual "Scan Current Page" button. Clicking it dispatches a
+  custom event ('deceptiscan-trigger') into the active tab's content script,
+  which re-runs the page scan immediately.
+  
+  Note: scripting.executeScript is used to fire the event because popup
+  and content script contexts are isolated; direct calls are not possible.
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>DeceptiScan</title>
+  <style>
+    body {
+      width: 280px;
+      font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+      padding: 20px;
+      background: #121417;
+      color: #f1f5f9;
+      margin: 0;
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 20px;
+    }
+    .icon-bg {
+      background-color: rgba(245, 158, 11, 0.1);
+      padding: 8px;
+      border-radius: 9999px;
+      display: flex;
+    }
+    h2 {
+      color: #f1f5f9;
+      font-size: 16px;
+      font-weight: 600;
+      margin: 0;
+      letter-spacing: -0.025em;
+    }
+    button {
+      background: #f1f5f9;
+      color: #0f172a;
+      border: none;
+      padding: 12px 16px;
+      border-radius: 8px;
+      cursor: pointer;
+      width: 100%;
+      font-size: 13px;
+      font-weight: 700;
+      transition: background-color 0.2s;
+    }
+    button:hover {
+      background: #ffffff;
+    }
+    #status {
+      margin-top: 16px;
+      font-size: 12px;
+      color: #94a3b8;
+      text-align: center;
+    }
+
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="icon-bg">
+      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#F59E0B" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+        <line x1="12" y1="8" x2="12" y2="12"></line>
+        <line x1="12" y1="16" x2="12.01" y2="16"></line>
+      </svg>
+    </div>
+    <h2>DeceptiScan AI</h2>
+  </div>
+
+  <button onclick="scan()">Scan Current Page</button>
+  <div id="status">System Ready</div>
+
+  <script>
+    async function scan() {
+      document.getElementById('status').innerText = 'Scanning...';
+
+      // Inject an event into the active tab to trigger the content script's scanPage()
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        function: () => { window.dispatchEvent(new Event('deceptiscan-trigger')); },
+      });
+
+      // Update status after a short delay to give the scan time to run
+      setTimeout(() => {
+        document.getElementById('status').innerHTML =
+          'Scan triggered.<br><span style="color:#fb923c">Check the page for highlights.</span>';
+      }, 500);
+    }
+  </script>
+</body>
+</html>
