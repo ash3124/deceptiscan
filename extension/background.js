@@ -14,7 +14,7 @@ const keepAlive = () => setInterval(chrome.runtime.getPlatformInfo, 20000);
 chrome.runtime.onStartup.addListener(keepAlive);
 keepAlive();
 
-const API_BASE = 'http://127.0.0.1:5000'; // Local testing
+const API_BASE = 'https://deceptiscan.onrender.com';
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.type === 'SCAN_LINKS') {
