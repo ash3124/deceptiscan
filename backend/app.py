@@ -413,10 +413,9 @@ def trace_redirects():
         pass
     return jsonify({'chain': chain})
 
-from PIL import Image
-from pyzbar.pyzbar import decode
+import cv2
+import numpy as np
 import base64
-import io
 
 @app.route('/scan_qr', methods=['POST'])
 def scan_qr():
@@ -428,9 +427,17 @@ def scan_qr():
         if image_b64.startswith('data:image'):
             image_b64 = image_b64.split(',')[1]
         image_data = base64.b64decode(image_b64)
-        image = Image.open(io.BytesIO(image_data))
-        decoded = decode(image)
-        urls = [obj.data.decode('utf-8') for obj in decoded if obj.data.decode('utf-8').startswith('http')]
+        
+        np_arr = np.frombuffer(image_data, np.uint8)
+        img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+        
+        detector = cv2.QRCodeDetector()
+        val, pts, st_code = detector.detectAndDecode(img)
+        
+        urls = []
+        if val and val.startswith('http'):
+            urls.append(val)
+            
         return jsonify({'urls': urls})
     except Exception as e:
         return jsonify({'urls': [], 'error': str(e)})
