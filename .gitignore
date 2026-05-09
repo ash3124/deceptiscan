@@ -5,3 +5,6 @@ __pycache__/
 .DS_Store
 Thumbs.db
 backend/models/all-MiniLM-L6-v2/
+reputation.db
+backend/reputation.db
+*.db

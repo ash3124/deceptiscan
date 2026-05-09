@@ -245,7 +245,7 @@ function injectUI() {
         align-items: center;
       }
       .ds-trust-card {
-        width: 400px;
+        width: 450px;
         background-color: #121417;
         border: 1px solid #2D333B;
         border-radius: 1rem;
@@ -338,7 +338,6 @@ function injectUI() {
         cursor: pointer;
       }
       .ds-btn-enter:hover { color: #fb923c; }
-
     `;
     document.head.appendChild(style);
 
@@ -364,37 +363,35 @@ function injectUI() {
           <div class="ds-url-container">
             <code class="ds-url-text" id="ds-target-url"></code>
           </div>
+          <div id="ds-explanation" style="margin-top:1rem; font-size:0.875rem; color:#f43f5e; font-weight:500;"></div>
+          <div id="ds-reputation" style="margin-top:0.5rem; font-size:0.75rem; color:#94a3b8;">Loading reputation...</div>
+          <div id="ds-chain" style="margin-top:0.5rem; font-size:0.75rem; color:#94a3b8; word-break: break-all;"></div>
           <p class="ds-question">Are you sure you want to proceed?</p>
         </div>
         <div class="ds-actions">
           <button class="ds-btn-exit" id="ds-cancel">Go Back (Recommended)</button>
           <button class="ds-btn-enter" id="ds-proceed">Proceed Anyway</button>
+          <button class="ds-btn-enter" id="ds-report-safe" style="color:#10b981; margin-top:0.5rem;">Report False Positive (Mark Safe)</button>
         </div>
       </div>
     `;
     document.body.appendChild(modal);
 
-    // Modal button handlers
     document.getElementById('ds-cancel').onclick = () => {
         document.getElementById('deceptiscan-modal').style.display = 'none';
     };
     document.getElementById('ds-proceed').onclick = () => {
         window.location.href = pendingUrl;
     };
+    document.getElementById('ds-report-safe').onclick = () => {
+        chrome.runtime.sendMessage({ type: 'REPORT_URL', url: pendingUrl, vote: 'safe' });
+        alert('Thank you for reporting. The community reputation has been updated.');
+        document.getElementById('deceptiscan-modal').style.display = 'none';
+    };
 }
 
-// Holds the href of the link that triggered the warning modal.
 let pendingUrl = '';
 
-// -------------------------------------------------------------------------
-// Click and form-submit interceptors
-// -------------------------------------------------------------------------
-
-/*
- * Block untrusted (programmatic) form submissions.
- * Legitimate user actions are trusted by the browser; synthetic events
- * dispatched by scripts are not, and are a common malvertising technique.
- */
 document.addEventListener('submit', e => {
     if (!e.isTrusted) {
         console.warn('DeceptiScan: Blocked untrusted form submission.');
@@ -403,14 +400,7 @@ document.addEventListener('submit', e => {
     }
 }, true);
 
-/*
- * Intercept all click events in the capture phase (before the browser
- * processes them) to:
- *   a) Block programmatic clicks used by pop-under ads.
- *   b) Show the warning modal when the user clicks a flagged deceptive link.
- */
 document.addEventListener('click', e => {
-    // Walk up the DOM tree to find the nearest anchor ancestor
     let target = e.target;
     while (target && target.tagName !== 'A') {
         target = target.parentNode;
@@ -418,7 +408,6 @@ document.addEventListener('click', e => {
 
     if (!target || !target.href) return;
 
-    // Block synthetic (non-user-initiated) clicks
     if (!e.isTrusted) {
         console.warn('DeceptiScan: Blocked untrusted click on', target.href);
         e.preventDefault();
@@ -426,10 +415,8 @@ document.addEventListener('click', e => {
         return;
     }
 
-    // Normalise the URL for comparison (lowercase, trailing slash stripped)
     const clickedUrl = target.href.toLowerCase().trim().replace(/\/$/, '');
 
-    // Look up this URL in the classification results store
     let foundMetadata = null;
     for (const [storedUrl, data] of linkMetadataMap) {
         if (storedUrl.toLowerCase().trim().replace(/\/$/, '') === clickedUrl) {
@@ -438,7 +425,6 @@ document.addEventListener('click', e => {
         }
     }
 
-    // If classified as deceptive, intercept navigation and show the modal
     if (foundMetadata && foundMetadata.isDeceptive) {
         e.preventDefault();
         e.stopImmediatePropagation();
@@ -447,31 +433,155 @@ document.addEventListener('click', e => {
         if (modal) {
             pendingUrl = target.href;
             document.getElementById('ds-target-url').innerText = target.href;
+            document.getElementById('ds-explanation').innerText = foundMetadata.explanation || '';
+            document.getElementById('ds-reputation').innerText = 'Loading reputation...';
+            document.getElementById('ds-chain').innerText = 'Tracing redirects...';
             modal.style.display = 'flex';
-        } else {
-            // Fallback if the modal was not injected (e.g. very early click)
-            alert(
-                'DECEPTISCAN SECURITY WARNING\n\n' +
-                'This link has been flagged as deceptive.\n\n' +
-                'Destination: ' + target.href
-            );
+
+            chrome.runtime.sendMessage({ type: 'GET_REPUTATION', url: target.href }, res => {
+                if (res && res.domain) {
+                    document.getElementById('ds-reputation').innerText = `Community: ${res.safe_votes} Safe, ${res.malicious_votes} Malicious`;
+                }
+            });
+
+            chrome.runtime.sendMessage({ type: 'TRACE_URL', url: target.href }, res => {
+                if (res && res.chain) {
+                    document.getElementById('ds-chain').innerHTML = `<strong>Redirect Chain:</strong><br>` + res.chain.join(' <br>➔ ');
+                } else {
+                    document.getElementById('ds-chain').innerText = 'No redirects detected.';
+                }
+            });
         }
     }
 }, true);
 
 // -------------------------------------------------------------------------
-// Initialisation
+// Advanced Detection Engines
 // -------------------------------------------------------------------------
+function detectHoneypots() {
+    const anchors = document.querySelectorAll('a[href]');
+    const honeypots = [];
+    const elementsMap = new Map();
 
-/**
- * Entry point: inject the UI and schedule two scan passes.
- * The second pass at 3 s catches links added by JavaScript after initial load.
- */
+    anchors.forEach(a => {
+        const rect = a.getBoundingClientRect();
+        const style = window.getComputedStyle(a);
+        let isHidden = false;
+
+        const hasText = a.textContent.trim().length > 0;
+
+        if (hasText && (rect.left < -999 || rect.top < -999 || parseInt(style.textIndent) < -999)) {
+            isHidden = true;
+        }
+
+        if (hasText && (style.opacity === '0' || parseInt(style.zIndex) < 0 || style.visibility === 'hidden')) {
+            isHidden = true;
+        }
+
+        if (rect.width > window.innerWidth * 0.5 && rect.height > window.innerHeight * 0.5) {
+            if (style.opacity === '0' || parseInt(style.zIndex) > 900) {
+                isHidden = true;
+            }
+        }
+
+        if (isHidden && a.href.startsWith('http') && !isSameSiteNavigation(a.href)) {
+            honeypots.push({ anchor_text: a.textContent.trim() || "Hidden Link", destination_url: a.href });
+            if (!elementsMap.has(a.href)) elementsMap.set(a.href, []);
+            elementsMap.get(a.href).push(a);
+        }
+    });
+
+    if (honeypots.length === 0) return;
+
+    chrome.runtime.sendMessage({ type: 'SCAN_LINKS', links: honeypots }, response => {
+        if (!response || !response.success) return;
+        
+        response.data.results.forEach(result => {
+            if (result.is_deceptive) {
+                const elements = elementsMap.get(result.destination_url);
+                if (elements) {
+                    elements.forEach(a => {
+                        a.style.setProperty('display', 'block', 'important');
+                        a.style.setProperty('opacity', '1', 'important');
+                        a.style.setProperty('visibility', 'visible', 'important');
+                        a.style.setProperty('border', '3px dashed #f43f5e', 'important');
+                        a.style.setProperty('background', 'rgba(244, 63, 94, 0.2)', 'important');
+                        a.style.setProperty('z-index', '9999', 'important');
+                        a.style.setProperty('position', 'relative', 'important');
+                        a.style.setProperty('padding', '10px', 'important');
+                        a.style.setProperty('margin-top', '10px', 'important');
+                        a.style.setProperty('text-align', 'center', 'important');
+                        a.style.setProperty('color', '#f43f5e', 'important');
+                        a.style.setProperty('font-weight', 'bold', 'important');
+                        a.setAttribute('title', `DECEPTISCAN WARNING: Malicious Honeypot\n${result.explanation || ''}`);
+                        console.warn('DeceptiScan: Confirmed malicious honeypot:', a.href);
+                    });
+                }
+            }
+        });
+    });
+}
+
+function detectPhishingClones() {
+    chrome.runtime.sendMessage({ type: 'GET_BRANDS' }, brands => {
+        if (!brands || Object.keys(brands).length === 0) return;
+
+        const title = document.title.toLowerCase();
+        const domain = window.location.hostname.toLowerCase();
+
+        for (const [brand, officialDomain] of Object.entries(brands)) {
+            if (officialDomain && title.includes(brand) && !domain.includes(officialDomain) && !domain.includes('127.0.0.1')) {
+                const banner = document.createElement('div');
+                banner.innerHTML = `<div style="position:fixed; top:0; left:0; width:100%; background:#f43f5e; color:white; text-align:center; padding:12px; z-index:2147483647; font-weight:bold; font-family:sans-serif; box-shadow:0 4px 6px rgba(0,0,0,0.1);">
+                    🚨 DECEPTISCAN ALERT: This page impersonates ${brand.toUpperCase()}! Official domain is ${officialDomain}. Do not enter credentials.
+                </div>`;
+                document.body.appendChild(banner);
+                console.warn(`DeceptiScan: Phishing clone detected for ${brand}`);
+            }
+        }
+    });
+}
+
+function extractQRCodes() {
+    const images = document.querySelectorAll('img');
+    images.forEach(img => {
+        if (img.width > 50 && img.width < 600 && img.height > 50 && img.height < 600) {
+            try {
+                const canvas = document.createElement('canvas');
+                canvas.width = img.width;
+                canvas.height = img.height;
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(img, 0, 0, img.width, img.height);
+                const dataURL = canvas.toDataURL('image/png');
+
+                chrome.runtime.sendMessage({ type: 'SCAN_QR', image: dataURL }, response => {
+                    if (response && response.urls && response.urls.length > 0) {
+                        console.warn('DeceptiScan: QR Code detected with URLs:', response.urls);
+                        chrome.runtime.sendMessage({ type: 'SCAN_LINKS', links: response.urls.map(u => ({ anchor_text: 'QR Code', destination_url: u })) }, res => {
+                            if (res && res.data && res.data.results) {
+                                res.data.results.forEach(r => {
+                                    if (r.isDeceptive || r.is_deceptive) {
+                                        img.style.border = '4px dotted #f43f5e';
+                                        img.style.boxShadow = '0 0 15px 5px rgba(244, 63, 94, 0.6)';
+                                        img.style.borderRadius = '8px';
+                                        alert(`DECEPTISCAN QUISHING WARNING:\nThe QR code on this page points to a malicious link:\n${r.destination_url}`);
+                                    }
+                                });
+                            }
+                        });
+                    }
+                });
+            } catch (e) { } // Ignore cross-origin canvas tainting
+        }
+    });
+}
+
 function startup() {
     console.log('DeceptiScan: Initialised.');
     injectUI();
-    setTimeout(scanPage, 1000);  // First pass: after initial DOM is ready
-    setTimeout(scanPage, 3000);  // Second pass: after JS-rendered content settles
+    detectPhishingClones();
+    setTimeout(() => { scanPage(); detectHoneypots(); extractQRCodes(); }, 1000);
+    setTimeout(() => { scanPage(); detectHoneypots(); }, 3000);
 }
 
 if (document.readyState === 'complete' || document.readyState === 'interactive') {
@@ -480,8 +590,9 @@ if (document.readyState === 'complete' || document.readyState === 'interactive')
     window.addEventListener('load', startup);
 }
 
-// Allow the popup to trigger a manual re-scan of the current page
 window.addEventListener('deceptiscan-trigger', () => {
     console.log('DeceptiScan: Manual scan triggered from popup.');
     scanPage();
+    detectHoneypots();
+    extractQRCodes();
 });

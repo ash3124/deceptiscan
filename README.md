@@ -1,5 +1,9 @@
 # DeceptiScan
 
+DeceptiScan is a machine-learning-powered Chrome Extension designed to protect users from zero-day phishing attacks, malvertising, and deceptive web navigation. 
+
+Instead of relying solely on static blacklists, DeceptiScan actively analyzes the **semantic relationship** between the text you click and the underlying destination URL, using a combination of Natural Language Processing (NLP) and a Random Forest Classifier.
+
 A browser extension that detects deceptive and phishing links in real time using machine learning. Unlike extensions that rely on static URL blacklists — which are ineffective against zero-day attacks — DeceptiScan computes the semantic relationship between the visible anchor text and the destination domain for every outbound link on a page.
 
 ---
@@ -17,10 +21,13 @@ The system has two components that work together:
 **Extension (Chrome, Manifest V3)**
 - Scans the page's anchor elements after load, skipping same-site and whitelisted links.
 - Forwards unseen links to the service worker, which contacts the backend API.
-- Visually annotates links on the page (red highlight for deceptive, blue for safe).
+- Visually annotates links on the page (red highlight for deceptive).
 - Intercepts clicks on flagged links in the DOM capture phase and presents a warning modal before any navigation occurs.
 - Blocks programmatic (untrusted) click and form-submit events used by pop-under ads.
-
+-  Extracts the destination URL from decoded QR data and forwards it through the same phishing detection pipeline used for anchor links.
+- Scans the full DOM on every page load, not just visible anchor elements.
+- Identifies hidden anchors by checking computed opacity below 0.05, elements positioned entirely outside the viewport, and zero-dimension elements.
+- Flags pages where structural similarity to a known brand exceeds the detection threshold but the current domain does not match that brand's canonical domains.
 ---
 
 ## Feature Set
@@ -110,7 +117,38 @@ cd backend
 pip install -r requirements.txt
 python app.py
 ```
+2. Turn on **Developer mode** (toggle in the top right).
+3. Click **Load unpacked**.
+4. Select the `extension/` folder from this project.
 
-The server starts at `http://127.0.0.1:5000`. Update the `fetch` URL in `extension/background.js` to point to it while testing locally.
+*(Note: If deploying your backend to a live server, ensure you update the API URL in `extension/background.js` before packaging the extension).*
 
 ---
+
+## 🧪 Testing the Extension
+
+We have provided a local HTML file containing various attack scenarios (Semantic Mismatches, Tracker Parameters, URL Shorteners, etc.).
+
+1. Ensure the backend server is running.
+2. Ensure the extension is loaded in Chrome.
+3. Open a local web server to host the demo page:
+   ```bash
+   python -m http.server 8000
+   ```
+4. Navigate to `http://localhost:8000/demo.html` in your browser. You will see the deceptive links highlighted automatically!
+
+---
+
+## 🧠 How the AI Works
+
+The core of DeceptiScan is a Random Forest model trained on both legitimate web traffic and datasets like PhishTank. It evaluates 13 distinct features in real-time:
+
+1.  **Semantic Similarity**: Cosine similarity between the link text and the destination URL content.
+2.  **Lexical Heuristics**: Detection of suspicious TLDs (`.xyz`, `.tk`), common scam keywords (`free`, `urgent`), IP-based URLs, and executable file extensions.
+3.  **Brand Impersonation**: Checks if the text references a major brand (e.g., Google, Amazon) while the destination domain does not match the canonical brand domain.
+
+---
+
+## 🛡️ Privacy First
+
+DeceptiScan is designed to protect your privacy. It only scans the `href` destinations of links explicitly rendered on the page. It does not track your browsing history, cookies, or session data, and implements local domain whitelisting to prevent unnecessary API calls.

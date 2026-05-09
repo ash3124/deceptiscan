@@ -86,24 +86,18 @@ def load_popular_domains():
 
 POPULAR_DOMAINS = load_popular_domains()
 
-# Mapping of well-known brand keywords to their canonical registered domains.
-# A value of None means no single canonical domain exists; any use with
-# login-style anchor text is treated as suspicious.
-BRAND_DOMAINS = {
-    'paypal':    'paypal.com',
-    'google':    'google.com',
-    'facebook':  'facebook.com',
-    'microsoft': 'microsoft.com',
-    'apple':     'apple.com',
-    'amazon':    'amazon.com',
-    'netflix':   'netflix.com',
-    'instagram': 'instagram.com',
-    'twitter':   'twitter.com',
-    'whatsapp':  'whatsapp.com',
-    'bank':      None,
-    'linkedin':  'linkedin.com',
-    'dropbox':   'dropbox.com',
-}
+def get_brand_domains():
+    """Fetch the brand domains mapping dynamically from the SQLite database."""
+    conn = sqlite3.connect('reputation.db')
+    c = conn.cursor()
+    c.execute('SELECT brand_name, canonical_domain FROM brands')
+    rows = c.fetchall()
+    conn.close()
+    
+    brand_dict = {}
+    for brand, domain in rows:
+        brand_dict[brand] = domain if domain else None
+    return brand_dict
 
 # Anchor text phrases that describe generic site navigation rather than
 # content, and therefore have no meaningful semantic link to a domain name.
@@ -136,7 +130,8 @@ def check_brand_impersonation(anchor_text, destination_url):
     ext = tldextract.extract(destination_url)
     actual_domain = f"{ext.domain}.{ext.suffix}".lower()
 
-    for brand, canonical in BRAND_DOMAINS.items():
+    brand_dict = get_brand_domains()
+    for brand, canonical in brand_dict.items():
         if brand in text_lower:
             if canonical is None:
                 return 1
@@ -242,21 +237,79 @@ def extract_features(anchor_text, destination_url):
     }
 
 # ---------------------------------------------------------------------------
+# Advanced Feature Engines (AI Explanations & Reputation)
+# ---------------------------------------------------------------------------
+
+import sqlite3
+
+def init_db():
+    conn = sqlite3.connect('reputation.db')
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS reputation
+                 (domain TEXT PRIMARY KEY, safe_votes INTEGER, malicious_votes INTEGER)''')
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS brands
+                 (brand_name TEXT PRIMARY KEY, canonical_domain TEXT)''')
+    
+    # Check if we need to seed the default brands
+    c.execute('SELECT COUNT(*) FROM brands')
+    if c.fetchone()[0] == 0:
+        default_brands = {
+            'paypal':    'paypal.com',
+            'paytm':     'paytm.com',
+            'sbi':       'onlinesbi.sbi',
+            'hdfc':      'hdfcbank.com',
+            'flipkart':  'flipkart.com',
+            'phonepe':   'phonepe.com',
+            'irctc':     'irctc.co.in',
+            'google':    'google.com',
+            'facebook':  'facebook.com',
+            'microsoft': 'microsoft.com',
+            'apple':     'apple.com',
+            'amazon':    'amazon.com',
+            'netflix':   'netflix.com',
+            'bank':      None,
+            'github':    'github.com',
+        }
+        for brand, domain in default_brands.items():
+            c.execute('INSERT INTO brands (brand_name, canonical_domain) VALUES (?, ?)', (brand, domain))
+            
+    conn.commit()
+    conn.close()
+
+init_db()
+
+def generate_explanation(f, is_deceptive):
+    reasons = []
+    if f['brand_impersonation'] == 1:
+        reasons.append("It imitates a trusted brand but redirects to an unofficial domain.")
+    if f['has_exe'] == 1:
+        reasons.append("The link leads directly to a potentially dangerous executable payload.")
+    if f['has_ip'] == 1:
+        reasons.append("It uses a direct IP address instead of a standard domain name.")
+    if f['has_shortener'] == 1:
+        reasons.append("It uses a URL shortener, which is often used to hide the true destination.")
+    if f['has_suspicious_tld'] == 1:
+        reasons.append("The domain uses a top-level domain (TLD) commonly associated with spam.")
+    if f['semantic_similarity'] < 0.2:
+        reasons.append("The text you clicked has almost nothing to do with the actual URL destination.")
+    if f['has_tracker_param'] == 1:
+        reasons.append("It contains tracking parameters often used in malicious redirect chains.")
+    
+    if not is_deceptive:
+        return "This link appears safe based on its structure and destination."
+    
+    if not reasons:
+        return "The AI engine flagged this link due to an unusual combination of structural anomalies."
+    
+    return " ".join(reasons)
+
+# ---------------------------------------------------------------------------
 # API routes
 # ---------------------------------------------------------------------------
 
 @app.route('/predict', methods=['POST'])
 def predict():
-    """Accept a JSON body with a 'links' array, run inference on each link,
-    and return a list of classification results.
-
-    Request body:
-        { "links": [{ "anchor_text": "...", "destination_url": "..." }, ...] }
-
-    Response body:
-        { "results": [{ "anchor_text", "destination_url", "is_deceptive",
-                        "confidence", "semantic_similarity" }, ...] }
-    """
     try:
         data = request.json
         links = data.get('links', [])
@@ -264,39 +317,127 @@ def predict():
 
         for link in links:
             features_dict = extract_features(link['anchor_text'], link['destination_url'])
-
-            # Build a DataFrame in the exact column order the model was trained on
             X = pd.DataFrame([features_dict])[feature_cols]
 
             prediction = clf.predict(X)[0]
             probabilities = clf.predict_proba(X)[0]
             confidence = probabilities.max() * 100
+            
+            is_deceptive = bool(prediction)
+            
+            # Trust Override: If the domain is highly reputable (Tranco Top 1M)
+            # and it is NOT attempting to impersonate another brand, force it to SAFE.
+            if features_dict.get('is_popular_domain') == 1 and features_dict.get('brand_impersonation') == 0:
+                is_deceptive = False
+
+            explanation = generate_explanation(features_dict, is_deceptive)
 
             results.append({
                 'anchor_text':        link['anchor_text'],
                 'destination_url':    link['destination_url'],
-                'is_deceptive':       bool(prediction),
+                'is_deceptive':       is_deceptive,
                 'confidence':         round(float(confidence), 1),
                 'semantic_similarity': round(float(features_dict['semantic_similarity']), 3),
+                'explanation':        explanation
             })
 
         return jsonify({'results': results})
-
     except Exception as e:
         import traceback
         return jsonify({'success': False, 'error': str(e), 'trace': traceback.format_exc()}), 500
 
+@app.route('/brands', methods=['GET'])
+def fetch_brands():
+    """Return the current active brand domains dictionary for the frontend."""
+    return jsonify(get_brand_domains())
+
+@app.route('/reputation', methods=['GET'])
+def get_reputation():
+    url = request.args.get('url')
+    ext = tldextract.extract(url)
+    domain = f"{ext.domain}.{ext.suffix}"
+    conn = sqlite3.connect('reputation.db')
+    c = conn.cursor()
+    c.execute('SELECT safe_votes, malicious_votes FROM reputation WHERE domain = ?', (domain,))
+    row = c.fetchone()
+    conn.close()
+    if row:
+        return jsonify({'domain': domain, 'safe_votes': row[0], 'malicious_votes': row[1]})
+    return jsonify({'domain': domain, 'safe_votes': 0, 'malicious_votes': 0})
+
+@app.route('/report', methods=['POST'])
+def report_domain():
+    data = request.json
+    url = data.get('url')
+    vote = data.get('vote')
+    ext = tldextract.extract(url)
+    domain = f"{ext.domain}.{ext.suffix}"
+    
+    conn = sqlite3.connect('reputation.db')
+    c = conn.cursor()
+    c.execute('SELECT safe_votes, malicious_votes FROM reputation WHERE domain = ?', (domain,))
+    row = c.fetchone()
+    if not row:
+        c.execute('INSERT INTO reputation (domain, safe_votes, malicious_votes) VALUES (?, 0, 0)', (domain,))
+    
+    if vote == 'safe':
+        c.execute('UPDATE reputation SET safe_votes = safe_votes + 1 WHERE domain = ?', (domain,))
+    elif vote == 'malicious':
+        c.execute('UPDATE reputation SET malicious_votes = malicious_votes + 1 WHERE domain = ?', (domain,))
+        
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True})
+
+import requests as req
+from urllib.parse import urljoin
+
+@app.route('/trace', methods=['POST'])
+def trace_redirects():
+    data = request.json
+    url = data.get('url')
+    chain = []
+    current_url = url
+    try:
+        for _ in range(5):
+            chain.append(current_url)
+            resp = req.head(current_url, allow_redirects=False, timeout=3)
+            if 300 <= resp.status_code < 400 and 'Location' in resp.headers:
+                next_url = resp.headers['Location']
+                if not next_url.startswith('http'):
+                    next_url = urljoin(current_url, next_url)
+                current_url = next_url
+            else:
+                break
+    except Exception:
+        pass
+    return jsonify({'chain': chain})
+
+from PIL import Image
+from pyzbar.pyzbar import decode
+import base64
+import io
+
+@app.route('/scan_qr', methods=['POST'])
+def scan_qr():
+    try:
+        data = request.json
+        image_b64 = data.get('image')
+        if not image_b64:
+            return jsonify({'urls': []})
+        if image_b64.startswith('data:image'):
+            image_b64 = image_b64.split(',')[1]
+        image_data = base64.b64decode(image_b64)
+        image = Image.open(io.BytesIO(image_data))
+        decoded = decode(image)
+        urls = [obj.data.decode('utf-8') for obj in decoded if obj.data.decode('utf-8').startswith('http')]
+        return jsonify({'urls': urls})
+    except Exception as e:
+        return jsonify({'urls': [], 'error': str(e)})
 
 @app.route('/health')
 def health():
-    """Simple health-check endpoint used by Render's uptime monitor."""
     return jsonify({'status': 'running', 'model_loaded': clf is not None})
 
-# ---------------------------------------------------------------------------
-# Entry point (local development only)
-# ---------------------------------------------------------------------------
-
 if __name__ == '__main__':
-    # In production this file is served by Gunicorn; the block below is for
-    # running the server locally during development.
     app.run(host='127.0.0.1', port=5000, debug=True)

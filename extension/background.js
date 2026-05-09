@@ -14,31 +14,70 @@ const keepAlive = () => setInterval(chrome.runtime.getPlatformInfo, 20000);
 chrome.runtime.onStartup.addListener(keepAlive);
 keepAlive();
 
-/*
- * Message handler for SCAN_LINKS requests sent by content.js.
- *
- * Expects: { type: 'SCAN_LINKS', links: [{ anchor_text, destination_url }] }
- * Responds: { success: true, data: { results: [...] } }
- *        or { success: false, error: '...' }
- *
- Returns true to signal that sendResponse will be called asynchronously.
- */
+const API_BASE = 'http://127.0.0.1:5000'; // Local testing
+
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.type === 'SCAN_LINKS') {
-    fetch('https://deceptiscan.onrender.com/predict', {
+    fetch(`${API_BASE}/predict`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ links: request.links }),
     })
       .then(r => r.json())
-      .then(data => {
-        sendResponse({ success: true, data });
-      })
-      .catch(err => {
-        console.error('DeceptiScan: Fetch error -', err.message);
-        sendResponse({ success: false, error: err.message });
-      });
+      .then(data => sendResponse({ success: true, data }))
+      .catch(err => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+  
+  if (request.type === 'GET_REPUTATION') {
+    fetch(`${API_BASE}/reputation?url=${encodeURIComponent(request.url)}`)
+      .then(r => r.json())
+      .then(data => sendResponse(data))
+      .catch(err => sendResponse({ error: err.message }));
+    return true;
+  }
 
-    return true; // Keep the message channel open for the async response.
+  if (request.type === 'REPORT_URL') {
+    fetch(`${API_BASE}/report`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: request.url, vote: request.vote }),
+    })
+      .then(r => r.json())
+      .then(data => sendResponse(data))
+      .catch(err => sendResponse({ error: err.message }));
+    return true;
+  }
+
+  if (request.type === 'TRACE_URL') {
+    fetch(`${API_BASE}/trace`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: request.url }),
+    })
+      .then(r => r.json())
+      .then(data => sendResponse(data))
+      .catch(err => sendResponse({ error: err.message }));
+    return true;
+  }
+
+  if (request.type === 'SCAN_QR') {
+    fetch(`${API_BASE}/scan_qr`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image: request.image }),
+    })
+      .then(r => r.json())
+      .then(data => sendResponse(data))
+      .catch(err => sendResponse({ error: err.message }));
+    return true;
+  }
+
+  if (request.type === 'GET_BRANDS') {
+    fetch(`${API_BASE}/brands`)
+      .then(r => r.json())
+      .then(data => sendResponse(data))
+      .catch(err => sendResponse({ error: err.message }));
+    return true;
   }
 });
